@@ -5,7 +5,6 @@ const fs = require("fs");
 // Server address. First launch writes server-url.txt in the app's data folder;
 // edit that file (or set TIMETRACKER_URL) to point installs at a different host.
 const DEFAULT_URL = "https://timer.conxept.co";
-// Installs from before the move to Hostinger saved the office iMac's address; they are moved to the live site.
 const OLD_OFFICE_URLS = ["http://192.168.1.11:3000", "https://192.168.1.11:3443"];
 const ICON_DATA_URL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAaUlEQVR4nGNgqLjCQBHGIcEJxMFAXAXFwVAxogwAafgCxP/R8BeoHF4DFmHRiI4X4TKgigjNMFyFbgAnDmfjwl/gYQI1IJgEzTAcjGwAKc5H9Qa1DKDYCxQHIsXRSJWERJWkTJXMRBIGADiu0EjqcbnNAAAAAElFTkSuQmCC";
 const IS_MAC = process.platform === "darwin";
