@@ -1,0 +1,58 @@
+{
+  "name": "conxept-timetracker-desktop",
+  "version": "1.2.0",
+  "private": true,
+  "description": "ConXept Team Time Tracker desktop app",
+  "author": "ConXept",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.conxept.timetracker",
+    "productName": "ConXept Time Tracker",
+    "files": [
+      "main.js",
+      "preload.js"
+    ],
+    "afterPack": "scripts/adhoc-sign.js",
+    "publish": {
+      "provider": "github",
+      "releaseType": "draft"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "minimumSystemVersion": "11.0",
+      "artifactName": "ConXept-Time-Tracker-mac.${ext}",
+      "target": [
+        { "target": "dmg", "arch": ["universal"] },
+        { "target": "zip", "arch": ["universal"] }
+      ]
+    },
+    "dmg": {
+      "sign": false
+    },
+    "win": {
+      "artifactName": "ConXept-Time-Tracker-Setup.${ext}",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    }
+  }
+}
