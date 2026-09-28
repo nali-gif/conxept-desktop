@@ -1,0 +1,65 @@
+# Builds the ConXept Time Tracker desktop app for Mac (one .dmg for Intel + Apple chips) and Windows (.exe) and
+# publishes both to a GitHub Release. The installed apps check these releases for updates.
+#
+# To release: bump "version" in package.json, then Actions → "Build desktop app" → Run workflow. About 15 minutes.
+# No secrets to set up: GitHub provides GITHUB_TOKEN automatically.
+name: Build desktop app
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Prepare the release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Create a draft release (if this version has none yet)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          gh release view "v$V" >/dev/null 2>&1 || gh release create "v$V" --draft --target "$GITHUB_SHA" \
+            --title "ConXept Time Tracker $V" \
+            --notes "Mac: ConXept-Time-Tracker-mac.dmg (Intel and Apple chips, macOS 11+). Windows: ConXept-Time-Tracker-Setup.exe."
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Build and upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          EP_GH_IGNORE_TIME: "true"
+        run: npx electron-builder --publish always -c.publish.owner="${{ github.repository_owner }}" -c.publish.repo="${{ github.event.repository.name }}"
+
+  publish:
+    name: Publish the release
+    needs: [release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Make it the latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.release.outputs.version }}
+        run: gh release edit "v$V" --repo "${{ github.repository }}" --draft=false --latest
