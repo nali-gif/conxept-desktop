@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld("desktop", {
   captureScreens: () => ipcRenderer.invoke("screen:capture"),
   // "granted" | "denied" | "not-determined" | "restricted" | "unknown" (always "granted" on Windows)
   getScreenPermission: () => ipcRenderer.invoke("screen:permission"),
+  // macOS: ask for Screen Recording (the app then appears in System Settings); returns the new status (1.2.1+)
+  requestScreenPermission: () => ipcRenderer.invoke("screen:request"),
   openScreenPermission: () => ipcRenderer.invoke("screen:open-permission"),
   focusWindow: () => ipcRenderer.invoke("window:focus"),
   // { current, available, downloaded, canAutoInstall, downloadUrl }
