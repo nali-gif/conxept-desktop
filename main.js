@@ -237,6 +237,9 @@ function buildTrayMenu() {
 // already running (one instance per data folder).
 if (!app.isPackaged && process.env.TT_USER_DATA) app.setPath("userData", process.env.TT_USER_DATA);
 
+// Windows shows an app's pop-ups only when this matches the installed shortcut's ID (electron-builder's appId)
+if (process.platform === "win32") app.setAppUserModelId("com.conxept.timetracker");
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -282,6 +285,22 @@ if (!gotLock) {
         win.focus();
         setTimeout(() => win && !win.isDestroyed() && win.setAlwaysOnTop(false), 1500);
       } catch {}
+    });
+    // 1.2.2: notifications as real system pop-ups (over other apps). The page's own web notifications go through its
+    // service worker, which Electron can't show. A click brings the window up and opens the page the note points to.
+    ipcMain.handle("notify", (_e, n) => {
+      try {
+        if (!Notification.isSupported() || !n || typeof n.title !== "string") return false;
+        const note = new Notification({ title: n.title.slice(0, 120), body: typeof n.body === "string" ? n.body.slice(0, 300) : "", silent: !!n.silent });
+        note.on("click", () => {
+          showWindow();
+          if (typeof n.href === "string" && n.href.startsWith("/") && win && !win.isDestroyed()) win.webContents.send("notify:click", n.href);
+        });
+        note.show();
+        return true;
+      } catch {
+        return false;
+      }
     });
     ipcMain.handle("update:info", () => ({ ...update }));
     ipcMain.handle("update:install", () => {
