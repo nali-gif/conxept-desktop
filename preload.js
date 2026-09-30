@@ -35,4 +35,7 @@ contextBridge.exposeInMainWorld("desktop", {
   getUpdateInfo: () => ipcRenderer.invoke("update:info"),
   onUpdateInfo: (cb) => listen("update:info", cb),
   installUpdate: () => ipcRenderer.invoke("update:install"),
+  // 1.2.2: a system notification { title, body, href?, silent? } → true when shown; cb(href) when one is clicked
+  notify: (n) => ipcRenderer.invoke("notify", n),
+  onNotifyClick: (cb) => listen("notify:click", cb),
 });
