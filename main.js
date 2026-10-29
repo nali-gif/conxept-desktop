@@ -1,6 +1,7 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, powerMonitor, nativeImage, shell, desktopCapturer, screen, systemPreferences, Notification } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, powerMonitor, nativeImage, shell, desktopCapturer, screen, systemPreferences, Notification, net } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 // Server address. First launch writes server-url.txt in the app's data folder;
 // edit that file (or set TIMETRACKER_URL) to point installs at a different host.
@@ -32,6 +33,27 @@ let win = null;
 let tray = null;
 let quitting = false;
 
+// ---- 1.3.0: start with the computer, quietly in the tray ----
+// Packaged builds add themselves to the OS login items. Windows passes LOGIN_ARG on those starts; macOS 13+ no longer
+// says whether an app was opened at login, so there a start within a few minutes of boot counts as one. A login start
+// keeps the window hidden (the tray icon is there); opening the app again shows it.
+const LOGIN_ARG = "--hidden";
+function setupLoginItem() {
+  if (!app.isPackaged || (process.platform !== "win32" && !IS_MAC)) return;
+  try {
+    app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true, args: [LOGIN_ARG] });
+  } catch {}
+}
+function openedAtLogin() {
+  if (process.argv.includes(LOGIN_ARG)) return true;
+  if (!app.isPackaged || !IS_MAC) return false;
+  try {
+    const s = app.getLoginItemSettings();
+    if (s.wasOpenedAtLogin || s.wasOpenedAsHidden) return true;
+  } catch {}
+  return os.uptime() < 180;
+}
+
 // Power log for the web app's timer: it pauses the running timer when the machine sleeps, locks or
 // shuts down, and uses these timestamps to tell a real sleep apart from a merely slow tab.
 const power = { startedAt: Date.now(), lastSuspendAt: 0, lastResumeAt: 0 };
@@ -49,15 +71,25 @@ function showWindow() {
   win.focus();
 }
 
-function createWindow() {
+function createWindow(hidden = false) {
   win = new BrowserWindow({
     width: 1280,
     height: 860,
     title: "ConXept Time Tracker",
+    show: !hidden, // a login start stays in the tray
     // keep the timer ticking while the window is hidden in the tray
     webPreferences: { preload: path.join(__dirname, "preload.js"), backgroundThrottling: false },
   });
   win.loadURL(serverUrl());
+  // at login the network is often not up yet: try the page again every 30 s until it loads
+  let retry = null;
+  win.webContents.on("did-fail-load", (_e, code, _desc, _url, isMainFrame) => {
+    if (!isMainFrame || code === -3 || retry) return; // -3 = aborted by a newer navigation
+    retry = setTimeout(() => {
+      retry = null;
+      if (win && !win.isDestroyed()) win.loadURL(serverUrl()).catch(() => {});
+    }, 30_000);
+  });
   // Links to other sites (Figma, staging, docs on the Board) open in the normal browser — never inside the
   // app window, which carries the preload bridge (idle / power data).
   const appOrigin = (() => { try { return new URL(serverUrl()).origin; } catch { return ""; } })();
@@ -141,6 +173,149 @@ async function captureScreens() {
   } catch (e) {
     return { status: "error", screens: [], error: String(e && e.message ? e.message : e) };
   }
+}
+
+// ---- system idle seconds (mouse + keyboard, any application) ----
+// Development runs only (`npm start`, never an installed app) can read a fake value from TT_FAKE_IDLE_FILE, so idle
+// behaviour can be tested while someone uses the PC.
+function idleSeconds() {
+  const fake = !app.isPackaged ? process.env.TT_FAKE_IDLE_FILE : null;
+  if (fake) {
+    try {
+      const v = Number(fs.readFileSync(fake, "utf8").trim());
+      if (Number.isFinite(v) && v >= 0) return v;
+    } catch {}
+  }
+  return powerMonitor.getSystemIdleTime();
+}
+/** Dev-only number from the environment (ignored by installed apps). */
+const devNumber = (name, dflt) => {
+  const v = !app.isPackaged ? Number(process.env[name]) : NaN;
+  return Number.isFinite(v) && v > 0 ? v : dflt;
+};
+
+// ---- 1.3.0: activity minutes ----
+// Runs in the main process, so it doesn't depend on a timer, on the page, or on the window being open. Every 10 s:
+// was there any mouse / keyboard input since the last look? If so those seconds count as active (a locked or sleeping
+// computer never does). Seconds are summed per minute; finished minutes are sent once a minute with the app's own
+// signed-in session. The server keeps only minutes inside the person's working hours. Unsent minutes wait (on disk
+// too) for up to a day; nobody signed in = they're dropped. Nothing is shown to the person.
+const SAMPLE_MS = devNumber("TT_SAMPLE_MS", 10_000);
+const UPLOAD_MS = devNumber("TT_UPLOAD_MS", 60_000);
+const KEEP_MS = 26 * 3600_000;
+const MINUTE = 60_000;
+const minutes = new Map(); // minute start (epoch ms) → active seconds
+let lastSampleAt = 0;
+let away = false; // screen locked
+let sending = false;
+let bufferDirty = false;
+
+const bufferFile = () => path.join(app.getPath("userData"), "activity-minutes.json");
+function loadBuffer() {
+  try {
+    const j = JSON.parse(fs.readFileSync(bufferFile(), "utf8"));
+    const now = Date.now();
+    if (Array.isArray(j)) for (const [t, s] of j) if (Number.isFinite(t) && Number.isFinite(s) && t > now - KEEP_MS && t <= now) minutes.set(t, Math.max(minutes.get(t) || 0, s));
+  } catch {}
+}
+function saveBuffer() {
+  if (!bufferDirty) return;
+  bufferDirty = false;
+  try {
+    fs.writeFileSync(bufferFile(), JSON.stringify(Array.from(minutes.entries())));
+  } catch {}
+}
+
+/** Count [from, to) as active, split across the minutes it touches. */
+function credit(from, to) {
+  for (let t = from; t < to; ) {
+    const m = Math.floor(t / MINUTE) * MINUTE;
+    const end = Math.min(to, m + MINUTE);
+    minutes.set(m, Math.min(60, (minutes.get(m) || 0) + (end - t) / 1000));
+    t = end;
+  }
+  bufferDirty = true;
+}
+
+function sampleActivity() {
+  const now = Date.now();
+  const prev = lastSampleAt;
+  lastSampleAt = now;
+  if (!prev) return;
+  // a long gap means the computer slept or the app stalled: only the last sample's worth can count
+  const from = now - prev > SAMPLE_MS * 3 ? now - SAMPLE_MS : prev;
+  let state = "unknown";
+  try {
+    state = powerMonitor.getSystemIdleState(60);
+  } catch {}
+  if (state === "locked") {
+    away = true;
+    return;
+  }
+  if (away) {
+    if (state === "unknown") return; // locked by the event, and the OS can't say otherwise
+    away = false; // the OS says it's unlocked (a missed unlock event can't stop the count for good)
+  }
+  let idle = 0;
+  try {
+    idle = idleSeconds();
+  } catch {
+    return;
+  }
+  if (idle * 1000 < now - from) credit(from, now); // input since the last look
+}
+
+async function sendMinutes() {
+  if (sending) return;
+  const now = Date.now();
+  const current = Math.floor(now / MINUTE) * MINUTE;
+  const batch = [];
+  for (const [t, s] of Array.from(minutes.entries()).sort((a, b) => a[0] - b[0])) {
+    if (t >= current) continue; // still filling
+    const a = Math.min(60, Math.round(s));
+    if (t < now - KEEP_MS || a < 1) {
+      minutes.delete(t);
+      bufferDirty = true;
+    } else if (batch.length < 720) batch.push({ t, a });
+  }
+  if (!batch.length) return saveBuffer();
+  let url;
+  try {
+    url = new URL("/api/productivity/minutes", serverUrl()).toString();
+  } catch {
+    return saveBuffer();
+  }
+  sending = true;
+  try {
+    const res = await net.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ minutes: batch }),
+      credentials: "include", // the app's own sign-in (session cookie)
+      cache: "no-store",
+    });
+    // saved / not recorded for this person (204) / not valid / nobody signed in: done with these. A server error waits.
+    if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429)) {
+      for (const m of batch) minutes.delete(m.t);
+      bufferDirty = true;
+    }
+  } catch {
+    // offline: try again next minute
+  } finally {
+    sending = false;
+    saveBuffer();
+  }
+}
+
+function startActivityMinutes() {
+  loadBuffer();
+  powerMonitor.on("lock-screen", () => { away = true; });
+  powerMonitor.on("unlock-screen", () => { away = false; lastSampleAt = 0; });
+  // asleep: nothing runs; the first look after waking starts the clock again
+  for (const kind of ["suspend", "resume"]) powerMonitor.on(kind, () => { lastSampleAt = 0; });
+  setInterval(sampleActivity, SAMPLE_MS);
+  setInterval(() => { sendMinutes(); }, UPLOAD_MS);
+  app.on("before-quit", saveBuffer);
 }
 
 // ---- updates (round 8): GitHub Releases. Windows downloads and installs on quit; an unsigned Mac app can't replace
@@ -249,18 +424,8 @@ if (!gotLock) {
   app.whenReady().then(() => {
     // what the page needs to know up front (sync: read once by the preload)
     ipcMain.on("app:info", (e) => { e.returnValue = { version: app.getVersion(), platform: process.platform }; });
-    // true system-wide idle seconds (mouse + keyboard, any application). Development runs only (`npm start`, never an
-    // installed app) can read a fake value from TT_FAKE_IDLE_FILE, so the idle pause can be tested while someone uses the PC.
-    const fakeIdleFile = !app.isPackaged ? process.env.TT_FAKE_IDLE_FILE : null;
-    ipcMain.handle("idle:seconds", () => {
-      if (fakeIdleFile) {
-        try {
-          const v = Number(fs.readFileSync(fakeIdleFile, "utf8").trim());
-          if (Number.isFinite(v) && v >= 0) return v;
-        } catch {}
-      }
-      return powerMonitor.getSystemIdleTime();
-    });
+    // true system-wide idle seconds (mouse + keyboard, any application); see idleSeconds() for the dev-only fake
+    ipcMain.handle("idle:seconds", () => idleSeconds());
     ipcMain.handle("power:state", () => ({ ...power, idleSeconds: powerMonitor.getSystemIdleTime(), now: Date.now() }));
     for (const kind of ["suspend", "resume", "lock-screen", "unlock-screen", "shutdown"]) {
       powerMonitor.on(kind, () => sendPower(kind));
@@ -310,11 +475,13 @@ if (!gotLock) {
       }
     });
     // handlers first, so the page's preload always finds them
-    createWindow();
+    createWindow(openedAtLogin());
     tray = new Tray(nativeImage.createFromDataURL(ICON_DATA_URL));
     tray.setToolTip("ConXept Time Tracker");
     buildTrayMenu();
     setupUpdates();
+    setupLoginItem(); // 1.3.0: start with the computer
+    startActivityMinutes(); // 1.3.0: activity minutes, timer or not
   });
 
   app.on("before-quit", () => {
