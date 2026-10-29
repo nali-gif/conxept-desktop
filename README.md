@@ -13,10 +13,13 @@ The website does all the work (settings, rules, storage); this app contains no k
    `ConXept-Time-Tracker-Setup.exe` (Windows 10/11). Windows installs update themselves; Mac users get a notice.
 
 ## Files
-- `main.js` — window, tray, idle / power events, screenshots, updates
+- `main.js` — window, tray, idle / power events, activity minutes, screenshots, updates; from 1.3 it starts with the
+  computer (in the tray)
 - `preload.js` — the `window.desktop` bridge the website uses
 - `scripts/adhoc-sign.js` — signs the Mac app ad hoc (no Apple Developer account), so Apple-chip Macs open it
 - `.github/workflows/release.yml` — the build
 
 ## Running it locally
-`npm install`, then `npm start`. `TIMETRACKER_URL=http://localhost:3000` points it at a local server.
+`npm install`, then `npm start`. `TIMETRACKER_URL=http://localhost:3000` points it at a local server. Development-only
+switches (ignored by installed apps): `TT_USER_DATA`, `TT_FAKE_IDLE_FILE`, `TT_FAKE_SCREENS=1`, `TT_SAMPLE_MS`,
+`TT_UPLOAD_MS`; `--hidden` starts it in the tray as a login start would.
